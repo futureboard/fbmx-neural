@@ -172,7 +172,7 @@ class SyntheticTeacher:
         """Return ``(wet [N, T], gain_reduction [N, T])``.
 
         The gain trace is returned as an auxiliary target: a future
-        gain-reduction loss (see ``fbmx.losses.aux``) needs exactly this, and
+        gain-reduction loss (see ``fbmx.losses.auxiliary``) needs exactly this, and
         the smoke dataset is where that plumbing gets exercised first.
         """
         n_seq, n_samples = dry.shape

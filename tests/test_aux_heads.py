@@ -17,7 +17,7 @@ from fbmx.datasets import DatasetInfo, DatasetManifest, ManifestEntry, PairedAud
 from fbmx.datasets.paired_audio import write_wav
 from fbmx.export.fbmx import read_fbmx, write_fbmx
 from fbmx.losses import build_loss
-from fbmx.losses.aux import AuxTraceLoss
+from fbmx.losses.auxiliary import AuxTraceLoss
 from fbmx.models import build_model
 
 

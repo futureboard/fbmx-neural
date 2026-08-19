@@ -18,7 +18,7 @@ from fbmx.losses import (
     TransientLoss,
     build_loss,
 )
-from fbmx.losses.aux import AuxTraceLoss
+from fbmx.losses.auxiliary import AuxTraceLoss
 
 
 @pytest.fixture

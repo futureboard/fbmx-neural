@@ -194,7 +194,7 @@ class StreamingModel(nn.Module, abc.ABC):
         trajectory, the sidechain control voltage -- when the teacher exports
         those traces.  Predictions are keyed ``pred_<trace>`` to match the
         dataset's ``aux[<trace>]``, which is what
-        :class:`fbmx.losses.aux.AuxTraceLoss` pairs up.
+        :class:`fbmx.losses.auxiliary.AuxTraceLoss` pairs up.
 
         The audio output stays mandatory; auxiliary heads are optional, are
         configured per model, and never affect the audio path at inference --

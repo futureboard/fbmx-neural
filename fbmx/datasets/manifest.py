@@ -50,7 +50,7 @@ class ManifestEntry:
     params: dict[str, Any] = field(default_factory=dict)
     #: Optional auxiliary target traces, ``{name: path}`` -- a gain-reduction
     #: or control-voltage trace exported by a teacher that can produce one.
-    #: Same length and rate as the audio; see ``fbmx.losses.aux``.
+    #: Same length and rate as the audio; see ``fbmx.losses.auxiliary``.
     aux: dict[str, str] = field(default_factory=dict)
     aux_sha256: dict[str, str] = field(default_factory=dict)
     dry_sha256: str = ""
