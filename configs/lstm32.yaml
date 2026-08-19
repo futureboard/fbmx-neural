@@ -1,0 +1,53 @@
+# LSTM-32: the V0 baseline architecture, at a training length that is worth
+# looking at.
+#
+# Still pointed at the synthetic teacher, because there is no real dataset yet.
+# When one arrives, replace the `data:` block with a `paired_audio` manifest and
+# change nothing else -- that is the whole point of the dataset abstraction.
+#
+#   data:
+#     type: paired_audio
+#     manifest: datasets/<name>/manifest.json
+#     segment_length: 98304
+#     train_split: train
+#     val_split: val
+
+extends: smoke.yaml
+
+run:
+  name: lstm32
+  description: LSTM-32 baseline, longer schedule, cosine decay
+
+model:
+  type: lstm
+  hidden_size: 32
+  num_layers: 1
+  conditioning: concat
+  residual: true
+
+data:
+  num_sequences: 64
+  sequence_length: 49152    # ~1 s at 48 kHz; long enough for the release to matter
+
+loss:
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+  - name: dc
+    weight: 0.1
+
+train:
+  epochs: 60
+  batch_size: 8
+  chunk_size: 4096
+  tbptt_chunks: 2           # gradients reach back 8192 samples (~170 ms)
+  warmup_samples: 2048
+  lr: 0.003
+  scheduler: cosine
+  min_lr: 0.00005
+  log_every: 50
+  checkpoint_dir: checkpoints/lstm32

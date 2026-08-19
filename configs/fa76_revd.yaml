@@ -1,0 +1,88 @@
+# FA76 Rev D distillation, V0.
+#
+# Teacher: the FA76 circuit core (crates/fa76-dataset-gen), not hardware.
+# Student: LSTM-32, causal, stateful, mono, 48 kHz.
+#
+# The objective of this configuration is to establish that circuit -> neural
+# distillation works end to end, not to reach production quality. Judge it with
+# `fa76-neural-lab compare`, which measures attack/release timing, transfer
+# curves and harmonic structure against the circuit — not with val_loss.
+
+run:
+  name: fa76-revd-lstm32
+  description: LSTM-32 distilled from the FA76 Rev D circuit core
+
+model:
+  type: lstm
+  hidden_size: 32
+  num_layers: 1
+  conditioning: concat      # what the Rust runtime implements; not an experiment here
+  cond_proj_dim: null
+  head_hidden: 0
+  residual: true
+  sample_rate: 48000
+  # Auxiliary head predicting the gain-reduction trace. The audio head is
+  # mandatory; this one is optional and costs the audio path nothing at
+  # inference (the .fbmx carries its weights and the runtime ignores them).
+  # `cv` is exported by the teacher and can be added here, but it is untested,
+  # so V0 ships with gain only rather than with a trace nobody has validated.
+  aux_heads: [gain]
+
+data:
+  type: paired_audio
+  manifest: ../datasets/fa76-revd-v1/manifest.json
+  segment_length: null      # whole 1 s sequences; the trainer does the chunking
+  aux_traces: [gain]
+  # Refuse a manifest that is not this teacher. Without this, pointing the
+  # config at a hardware capture or another revision would train happily and
+  # produce a model whose provenance claim is false.
+  expect:
+    source_type: circuit_model
+    teacher: FA76 Circuit
+    revision: Rev D
+  train_split: train
+  val_split: val
+
+loss:
+  # L = waveform + spectral + lambda_gr * GR   (lambdas live here, not in code)
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+  - name: aux_trace
+    as: gr
+    key: gain
+    weight: 0.5             # lambda_gr
+    scale: 0.04             # the trace is dB (0..-25); the head predicts dB/25,
+                            # which it can reach from its initialisation. Both
+                            # numbers live here rather than in code.
+
+train:
+  epochs: 40
+  batch_size: 8
+  chunk_size: 4096
+  # Gradients reach back chunk_size * tbptt_chunks = 16384 samples (341 ms).
+  # This is not arbitrary: at 2 (170 ms) the model fitted the waveform well and
+  # got the *release* badly wrong — 60-85 % too fast, because the gradient
+  # horizon was shorter than the release it was being asked to learn. Widening
+  # it to 4 cut the median release-timing error from 71 % to 62 %, took the
+  # 20:1 fast-attack case from -20 % to +1 %, and improved every other measured
+  # quantity as well. See the phase-2 comparison in target/dsp-analysis/.
+  tbptt_chunks: 4
+  warmup_samples: 2048
+  lr: 0.003
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: cosine
+  min_lr: 0.00005
+  device: auto
+  amp: false
+  seed: 0
+  log_every: 100
+  validate_every: 1
+  monitor: val_loss
+  monitor_mode: min
+  checkpoint_dir: checkpoints/fa76_revd

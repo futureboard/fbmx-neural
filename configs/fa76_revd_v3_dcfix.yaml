@@ -1,0 +1,72 @@
+# Experiment: kill the model's DC offset.
+#
+# One variable changed against fa76_revd_v2.yaml — a `silence_dc` term is added
+# to the loss. Same data, same horizon, same heads, same schedule, same seed.
+#
+# Why: with silence at the input the circuit puts out exactly zero and the
+# phase-3 models put out a constant, measured by `fa76-neural-lab compare`:
+#
+#     INPUT 2.0, 4:1     -28.1 dBFS      (four percent of full scale)
+#     INPUT 6.0, 4:1     -50.1 dBFS
+#     INPUT 8.0, 4:1     -57.8 dBFS
+#     INPUT 6.0, 20:1    -77.3 dBFS
+#
+# It is parameter-dependent, it is the same size in both trained models, and
+# it is what a plugin analyser draws as a deep notch and a peak below ~60 Hz
+# while a stepped sine sweep of the same model reads flat to within a decibel.
+# A constant across an FFT capture window *is* energy at DC, smeared by the
+# window into the lowest bins; an RMS level probe integrates it away.
+#
+# The corpus is not the problem — `signal_to_silence` sequences run a quarter
+# to a half silent. The objective is: three millivolts of L1 is nothing beside
+# the error where there is signal, and `norm_mae` does not help either, because
+# a silent passage sits on the envelope floor and its weight saturates.
+#
+# Weight 0.001 against a term that reads ~90 at the current offset and ~1 at
+# the -90 dBFS tolerance: about 0.09 of loss at the start, next to an MAE
+# around 0.01, falling to nothing once the offset is gone. Enough pressure to
+# matter, not enough to outrank reproducing the audio.
+
+extends: fa76_revd_v2.yaml
+
+run:
+  name: fa76-revd-lstm32-dcfix
+  description: phase-3 recipe with the output's DC content penalised
+
+loss:
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+  - name: aux_trace
+    as: gr
+    key: gain
+    weight: 0.5
+    scale: 0.04
+  - name: aux_trace
+    as: cv
+    key: cv
+    weight: 0.25
+    scale: 0.5
+  - name: silence_dc
+    weight: 0.001
+    corner_hz: 5.0
+    target_dbfs: -90.0
+
+train:
+  checkpoint_dir: checkpoints/fa76_revd_dcfix
+
+# Run as a fine-tune from the phase-3 model, not from scratch: the defect is a
+# small correction to a model that otherwise works, and starting over would
+# re-roll every other measured number along with it.
+#
+#   python scripts/train.py --config configs/fa76_revd_v3_dcfix.yaml \
+#       --init-weights checkpoints/fa76_revd_v2/best.pt \
+#       --set train.epochs=8 train.lr=0.0006
+#
+# `configs/fa76_revd_v3_control.yaml` is the matched control for the same
+# number of epochs at the same learning rate without the term, which is what
+# separates "the DC term worked" from "eight more epochs helped".

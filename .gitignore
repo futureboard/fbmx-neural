@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Training artifacts and data are never committed.
+checkpoints/
+runs/
+models/*.fbmx
+datasets/*/audio/
+*.wav
+*.flac
+*.pt
+
+# Manifests ARE committed -- they describe data without redistributing it.
+!datasets/*/manifest.json

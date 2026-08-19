@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fbmx"
+version = "0.1.0"
+description = "Futureboard neural DSP research stack: causal, stateful models of audio effects and the .fbmx model container"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["audio", "dsp", "neural-network", "audio-effects", "realtime"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+# Deliberately three dependencies. Everything else is optional, and nothing
+# here is required by the eventual Rust runtime.
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+audio = ["soundfile>=0.12"]      # FLAC/AIFF; plain WAV works without it
+onnx = ["onnx>=1.15"]            # reference export only, never a runtime dep
+
+[tool.setuptools.packages.find]
+include = ["fbmx*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::FutureWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

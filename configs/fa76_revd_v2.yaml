@@ -1,0 +1,94 @@
+# FA76 Rev D distillation, phase 3.
+#
+# Same model as phase 2 — LSTM-32, one layer, concat conditioning — on purpose.
+# The question this configuration exists to answer is whether that model can
+# learn the circuit's long-memory dynamics once the *data* and the *training
+# horizon* stop getting in the way. Capacity comes later, if the answer is no.
+#
+# What changed since fa76_revd.yaml:
+#
+#   dataset     v2: dry/wet aligned to 1e-5 samples (was 0.139 left in),
+#               gain-reduction-targeted sampling over -40..0 dBFS, matched
+#               20:1 / all-buttons pairs, 2.5 s sequences
+#   horizon     gradients reach back 32768 samples (683 ms), past the longest
+#               release the circuit has (~550 ms)
+#   warmup      8192 samples of state settling before any loss is scored
+#   supervision gain reduction *and* control voltage
+#
+# Judge it with `fa76-neural-lab compare`, not with val_loss.
+
+run:
+  name: fa76-revd-lstm32-v2
+  description: LSTM-32 distilled from the FA76 Rev D circuit core, long-horizon
+
+model:
+  type: lstm
+  hidden_size: 32
+  num_layers: 1
+  conditioning: concat
+  cond_proj_dim: null
+  head_hidden: 0
+  residual: true
+  sample_rate: 48000
+  # Both traces the teacher exports. The audio head stays mandatory; these two
+  # cost the audio path nothing at inference (the Rust runtime never evaluates
+  # them) and exist to force the recurrent state to carry the dynamics rather
+  # than only enough to reproduce the waveform.
+  aux_heads: [gain, cv]
+
+data:
+  type: paired_audio
+  manifest: ../datasets/fa76-revd-v2/manifest.json
+  segment_length: null      # whole 2.5 s sequences; the trainer chunks them
+  aux_traces: [gain, cv]
+  expect:
+    source_type: circuit_model
+    teacher: FA76 Circuit
+    revision: Rev D
+  train_split: train
+  val_split: val
+
+loss:
+  # L = waveform + spectral + lambda_gr * GR + lambda_cv * CV
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+  - name: aux_trace
+    as: gr
+    key: gain
+    weight: 0.5             # lambda_gr
+    scale: 0.04             # trace is dB (0..-31); the head predicts dB/25
+  - name: aux_trace
+    as: cv
+    key: cv
+    weight: 0.25            # lambda_cv
+    scale: 0.5              # trace is volts (0..3, median peak 0.31)
+
+train:
+  epochs: 30
+  batch_size: 4             # smaller than phase 2: a 32768-sample window is
+                            # already a large effective batch, and step count
+                            # matters more than per-step throughput here
+  chunk_size: 4096
+  tbptt_chunks: 8           # 8 x 4096 = 32768 samples = 683 ms of gradient
+  warmup_samples: 8192      # 170 ms of state settling, excluded from the loss
+  lr: 0.003
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: cosine
+  min_lr: 0.00005
+  device: auto
+  threads: 6                # two experiments share a 12-core machine
+  amp: false
+  seed: 0
+  log_every: 0
+  validate_every: 1
+  monitor: val_loss
+  monitor_mode: min
+  early_stopping_patience: 6
+  early_stopping_min_delta: 0.0005
+  checkpoint_dir: checkpoints/fa76_revd_v2

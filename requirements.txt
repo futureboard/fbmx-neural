@@ -1,0 +1,16 @@
+# Runtime requirements for training and export.
+#
+# CPU wheels are the default and are enough for everything in this repository.
+# For CUDA, install torch from the PyTorch index first, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# then install the rest of this file.
+torch>=2.1
+numpy>=1.24
+pyyaml>=6.0
+
+# Development
+pytest>=7.4
+
+# Optional, not imported unless present:
+#   soundfile>=0.12   FLAC/AIFF support (plain WAV is handled internally)
+#   onnx>=1.15        reference-only ONNX export; never required at runtime

@@ -1,0 +1,37 @@
+# Ablation: no auxiliary heads.
+#
+# One variable changed against fa76_revd_v2.yaml — the gain-reduction and
+# control-voltage heads are removed, along with their loss terms. Same data,
+# same horizon, same waveform/spectral loss, same schedule, same seed.
+#
+# Why: phase 3 improved the dynamics but regressed the high-frequency response
+# by ~1 dB RMSE (-3 dB at 20 kHz), and the error turned out to be
+# level-independent, so it is not the corpus being thin at the quiet end. The
+# leading suspect is the two heads competing for a 32-unit state: asking the
+# same 32 numbers to carry the gain trajectory and the control voltage as well
+# as the audio has to come from somewhere. This is the run that tests it.
+
+extends: fa76_revd_v2.yaml
+
+run:
+  name: fa76-revd-lstm32-noaux
+  description: phase-3 recipe with the auxiliary heads removed
+
+model:
+  aux_heads: []
+
+data:
+  aux_traces: []
+
+loss:
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+
+train:
+  threads: 6                # 6 physical cores; 12 threads measured 2.5x slower
+  checkpoint_dir: checkpoints/fa76_revd_noaux

@@ -1,0 +1,61 @@
+# Pipeline smoke test.
+#
+# Purpose: prove that dataset -> training -> checkpoint -> resume -> export ->
+# streaming inference all work, in about a minute on a CPU. The target is a toy
+# synthetic teacher (see fbmx/datasets/synthetic.py) and the resulting model has
+# no acoustic meaning whatsoever. Do not tune anything here expecting to learn
+# something about audio.
+
+run:
+  name: smoke
+  description: end-to-end pipeline check on procedurally generated audio
+
+model:
+  type: lstm
+  hidden_size: 32
+  num_layers: 1
+  conditioning: concat      # none | concat | film | both
+  cond_proj_dim: null       # null = feed raw normalised params + embeddings
+  head_hidden: 0            # 0 = single linear output layer
+  residual: true            # y = x + head(h)
+  sample_rate: 48000
+
+data:
+  type: synthetic_smoke
+  num_sequences: 16
+  sequence_length: 12288    # 256 ms at 48 kHz
+  sample_rate: 48000
+  seed: 0
+  train_split: train
+  val_split: val
+
+loss:
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.2
+    # Windows are short because the training chunk is 4096 samples; a
+    # resolution longer than the chunk is dropped with a warning.
+    fft_sizes: [256, 512, 1024]
+    hop_sizes: [64, 128, 256]
+    win_lengths: [256, 512, 1024]
+
+train:
+  epochs: 20
+  batch_size: 4
+  chunk_size: 4096          # TBPTT chunk
+  tbptt_chunks: 1           # optimiser step every N chunks; state carries on
+  warmup_samples: 1024      # excluded from the loss at each sequence start
+  lr: 0.005
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: null
+  device: auto              # auto | cpu | cuda | cuda:0 | mps
+  amp: false                # FP32 is the reference; AMP is opt-in
+  seed: 0
+  deterministic: false
+  log_every: 20
+  validate_every: 1
+  monitor: val_loss
+  monitor_mode: min
+  checkpoint_dir: checkpoints/smoke

@@ -1,0 +1,80 @@
+# FA76 Rev D distillation, phase 3 revised.
+#
+# Two things changed against fa76_revd_v2.yaml, both of them data-or-objective
+# rather than model. The model is still LSTM-32, one layer, concat conditioning.
+#
+# 1. A `silence_dc` term in the loss.
+#
+#    With silence at the input the circuit puts out exactly zero and every
+#    phase-3 model put out a constant instead — measured by
+#    `fa76-neural-lab compare` at -50 dBFS typical and -28 dBFS at INPUT 2,
+#    which is four percent of full scale with nothing playing. It is what a
+#    plugin analyser draws as a deep notch and a peak below ~60 Hz while a
+#    stepped sine sweep of the same model reads flat to within a decibel: a
+#    constant across an FFT capture window is energy at DC, smeared by the
+#    window into the lowest bins, and an RMS level probe integrates it away.
+#
+#    No existing term could see it. Three millivolts of L1 is nothing beside
+#    the error where there is signal, and `norm_mae` cannot help either because
+#    a silent passage sits on the envelope floor and its weight saturates —
+#    which is why both trained models carried the offset at the same size.
+#
+# 2. The v3 corpus, which is twice the size and covers the whole Input dial.
+#
+#    The v2 sampler chose every operating point by inverting the gain-reduction
+#    calibration table, so by construction it only ever produced settings hot
+#    enough to compress: the Input dial bottomed out at 3.65 and five sequences
+#    of five hundred sat below 4.0. That is most of a control the user can turn
+#    to zero, absent from the data. It is also why fine-tuning v2 with the DC
+#    term alone moved the typical offset (-50 -> -54 dBFS) but left INPUT 2
+#    exactly where it was at -29.5 dBFS — no loss term reaches a setting the
+#    corpus never visits. `clean_input_sweep` now takes one slot in twelve and
+#    sweeps 0..6.5 without targeting gain reduction at all.
+#
+#    The size is a separate experiment riding along. Phase 2 measured 0.51 dB
+#    of frequency-response RMSE on 850 training sequences; phase 3, on 419,
+#    measured 1.47 dB, and isolation runs ruled out the horizon (341 ms was
+#    worse), the auxiliary heads (removing them was worse) and the state's
+#    memory (its time constants run to seconds). The corpus was what was left.
+#    1000 sequences is the test.
+#
+# Judge it with `fa76-neural-lab compare`, not with val_loss.
+
+extends: fa76_revd_v2.yaml
+
+run:
+  name: fa76-revd-lstm32-v3
+  description: LSTM-32 distilled from the FA76 Rev D circuit core, full dial coverage
+
+data:
+  manifest: ../datasets/fa76-revd-v3/manifest.json
+
+loss:
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+  - name: aux_trace
+    as: gr
+    key: gain
+    weight: 0.5
+    scale: 0.04
+  - name: aux_trace
+    as: cv
+    key: cv
+    weight: 0.25
+    scale: 0.5
+  # ~90 at the offset the phase-3 models had, ~1 at the -90 dBFS tolerance, so
+  # this contributes about 0.09 against an MAE around 0.01 at the start and
+  # fades to nothing once the offset is gone. Enough to matter, not enough to
+  # outrank reproducing the audio.
+  - name: silence_dc
+    weight: 0.001
+    corner_hz: 5.0
+    target_dbfs: -90.0
+
+train:
+  checkpoint_dir: checkpoints/fa76_revd_v3

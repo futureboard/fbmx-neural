@@ -1,0 +1,67 @@
+# Experiment: level-normalised waveform loss.
+#
+# One variable changed against fa76_revd_v2.yaml — `mae` becomes `norm_mae`.
+# Same data, same horizon, same auxiliary heads, same schedule, same seed.
+#
+# Why: phase 3 measured that the model produces a ~150 ms release whatever the
+# Release dial says, while the circuit ranges over 242-547 ms, and separately
+# that the state can hold time constants of seconds. So the memory was never
+# the constraint; the objective was. A release tail is quiet, and an absolute
+# L1 charges almost nothing for getting a quiet passage wrong.
+#
+# `norm_mae` divides the waveform error by a 25 ms envelope of the target
+# (floored at -40 dBFS), which makes the error relative rather than absolute:
+# 3 dB of gain mistake costs the same 400 ms into a decay as it does under the
+# note that caused it.
+#
+# `exponent: 0.5` is not decoration. The first attempt used the fully relative
+# form (exponent 1), which spans a 100:1 weight range inside one chunk; the
+# spectral term spiked at epoch 4 and the NaN guard stopped the run at epoch 7.
+# Half the exponent gives a 10:1 range over the same 40 dB — still an order of
+# magnitude more attention on the release tail than plain L1 — and is stable.
+
+extends: fa76_revd_v2.yaml
+
+run:
+  name: fa76-revd-lstm32-control
+  description: control for the reweighting experiment - phase-3 loss, identical fine-tune
+
+loss:
+  - name: mae
+    weight: 1.0
+  - name: mrstft
+    weight: 0.5
+    fft_sizes: [512, 1024, 2048]
+    hop_sizes: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+  - name: aux_trace
+    as: gr
+    key: gain
+    weight: 0.5
+    scale: 0.04
+  - name: aux_trace
+    as: cv
+    key: cv
+    weight: 0.25
+    scale: 0.5
+
+train:
+  threads: 6                # 6 physical cores; 12 threads measured 2.5x slower
+  checkpoint_dir: checkpoints/fa76_revd_control
+
+# Run as a fine-tune from the phase-3 model rather than from scratch:
+#
+#   python scripts/train.py --config configs/fa76_revd_v3_normmae.yaml \
+#       --init-weights checkpoints/fa76_revd_v2/best.pt \
+#       --set train.epochs=10 train.lr=0.0008
+#
+# From scratch this objective is unstable at any exponent tried: emphasising
+# near-silence early, before the model produces sensible audio at all, lets the
+# output run away and the spectral term with it (26 -> 220 -> NaN at exponent
+# 1; 32 by epoch 1 at 0.5). Starting from a model that already works isolates
+# what the experiment is actually asking — does reweighting move the release? —
+# instead of testing whether the objective can bootstrap itself.
+#
+# `configs/fa76_revd_v3_control.yaml` is the matched control: same fine-tune,
+# same epochs, same learning rate, original loss. Without it, any improvement
+# could just be ten more epochs.
