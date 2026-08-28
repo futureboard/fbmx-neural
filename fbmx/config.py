@@ -111,7 +111,16 @@ def build_experiment(cfg: Mapping[str, Any]) -> dict[str, Any]:
     train_split = data_cfg.pop("train_split", "train")
     val_split = data_cfg.pop("val_split", "val")
 
-    train_dataset = build_dataset(data_cfg, split=train_split)
+    # ``None`` is an intentional split selector for datasets that should use
+    # every manifest entry.  ``build_dataset`` cannot distinguish an omitted
+    # override from an explicit ``None`` because its own default is ``train``,
+    # so carry the explicit value through the dataset config.
+    if train_split is None:
+        train_data_cfg = dict(data_cfg)
+        train_data_cfg["split"] = None
+        train_dataset = build_dataset(train_data_cfg, split=None)
+    else:
+        train_dataset = build_dataset(data_cfg, split=train_split)
     val_dataset = build_dataset(data_cfg, split=val_split) if val_split else None
 
     trainer_cfg = TrainerConfig.from_dict(cfg.get("train", {}))

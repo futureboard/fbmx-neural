@@ -21,6 +21,7 @@ from __future__ import annotations
 import warnings
 
 import torch
+import torch.nn.functional as F
 
 from fbmx.losses.waveform import FBMXLoss
 
@@ -66,6 +67,15 @@ class STFTLoss(FBMXLoss):
     def forward(self, pred, target, aux=None):
         pred = pred.reshape(-1, pred.shape[-1])
         target = target.reshape(-1, target.shape[-1])
+        # The trainer keeps the final partial chunk of each variable-length
+        # sequence.  ``torch.stft(..., center=True, pad_mode="reflect")``
+        # cannot reflect-pad a chunk shorter than half its window.  Pad only
+        # this loss input; waveform loss and recurrent state still see the
+        # original unpadded chunk.
+        if pred.shape[-1] < self.win_length:
+            pad = self.win_length - pred.shape[-1]
+            pred = F.pad(pred, (0, pad))
+            target = F.pad(target, (0, pad))
         window = self.window.to(device=pred.device, dtype=pred.dtype)
         pred_mag = _stft_magnitude(pred, self.n_fft, self.hop_length, self.win_length, window)
         target_mag = _stft_magnitude(

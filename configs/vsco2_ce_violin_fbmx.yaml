@@ -1,0 +1,142 @@
+# Solo Violin voicebank correction — FBMX residual, v3.
+#
+# What changed from v2, and why. Every item below was measured before it was
+# changed; the measurements are in `metadata/fbmx-pair-diagnostics.json` and in
+# the pair builder's docstring.
+#
+# DATA
+#   The v2 pairs were unlearnable, and that — not the model or the schedule —
+#   is what produced the watery output. The dry was a `Hybrid` render (the
+#   voicebank plus an uncorrelated ~40 Hz physical layer) while the runtime
+#   plays `VoicebankOnly`; the target sat at unity level while the dry was
+#   velocity-scaled, so a deterministic 1.5x-7x gain accounted for almost the
+#   whole "residual" (ESR 0.001 after a single scalar gain match); and the
+#   target was a mono downmix the runtime never produces. Naive `wet - dry`
+#   carried a mean ESR of 1.433 — more energy than the target itself.
+#
+#   v3 pairs are per channel, level matched, rendered exactly as the runtime
+#   renders, and verified for alignment and polarity before use. They come in
+#   two kinds:
+#     identity  the note from its own entry. Residual ~0. Teaches the model to
+#               leave a correctly resolved note alone.
+#     interp    the same recording read at a shifted pitch by the engine's
+#               4-point Hermite interpolator, against a 64-tap float64 sinc
+#               read of the same recording at the same positions. Same take,
+#               aligned by construction; the difference is the realtime
+#               interpolator's error and nothing else.
+#
+#   Pairing a *transposed recording* against the *real recording of the target
+#   pitch* was tried and abandoned on evidence: across 736 such pairs the best
+#   cross-correlation lag was 184-1056 samples, because they are different
+#   takes. Asking a waveform model to predict one performance from another is
+#   asking it to predict what is unpredictable, and the minimum-error answer is
+#   a phase-incoherent average — which is exactly what "watery" sounds like.
+#
+# LOSS
+#   v2 was mae(1.0) + mrstft(0.25), and the logged terms show what that meant in
+#   practice: train_mae 0.0034 against train_mrstft 13.28, so after weighting
+#   the multi-resolution STFT term was ~1000x the waveform term. That term is
+#   magnitude-only and therefore blind to phase, so the objective was very
+#   nearly "get the spectrum roughly right, phase is free" — a direct
+#   instruction to smear.
+#
+#   Now that the target is phase-exact and deterministic, the objective can be
+#   too: every term below is a time-domain term, so getting the phase right is
+#   the only way to score well.
+#
+#   `norm_mae` leads. Plain L1 is an absolute error, so the decay after a note
+#   contributes almost nothing and the interpolation error there — which is
+#   where a listener hears grit most clearly — goes uncorrected; dividing by a
+#   slow envelope of the target makes a 3 dB mistake cost the same whether it
+#   happens under the attack or 400 ms into the tail. Its -40 dBFS floor is what
+#   stops digital silence being amplified into the objective.
+#
+#   Raw `esr` was tried first, since it is the number this literature reports,
+#   and it is unusable *as a loss* here: it divides by the target's energy per
+#   chunk, and this material has near-silent chunks between notes, so the first
+#   probe run reported train_esr 7.9e6 and val_esr 363. The waveform module's own
+#   docstring warns about exactly this. ESR stays a reported metric.
+#
+#   A `dc` term was tried and removed for the same reason as `esr`: it also
+#   divides by the chunk's target energy, and the probe run reported train_dc
+#   65843. The DC offset stays a *measured* acceptance criterion instead — the
+#   shipped v2 model raised the render's DC from 3.5e-06 to 5.7e-03, a factor of
+#   1600, and `scripts/solfage_regression.py` reports exactly that number.
+
+run:
+  name: vsco2-ce-solo-violin-fbmx-v3
+  description: voicebank interpolation-error correction, phase-exact targets
+
+model:
+  type: lstm
+  hidden_size: 32
+  num_layers: 1
+  conditioning: concat
+  # The Rust fbmx-runtime consumes normalized continuous values and categorical
+  # embeddings directly; projected conditioning is intentionally unsupported, so
+  # this must stay 0 or the exported model will not match the runtime.
+  cond_proj_dim: 0
+  head_hidden: 0
+  residual: true
+  sample_rate: 48000
+
+data:
+  type: paired_audio
+  manifest: ../solfage-datasets/vsco2-ce/manifests/violin-fbmx.json
+  # Half a second per training sequence. Fixed-length segments are what make
+  # batching possible at all (ragged sequences force batch_size 1), and batch 1
+  # on CPU spends most of its time in per-call overhead rather than arithmetic.
+  # The recurrent state is reset at each segment boundary, so the segment has to
+  # be long enough to contain the model's memory many times over: this model is
+  # correcting an interpolator, whose memory is a handful of samples, so 24000 is
+  # four orders of magnitude of headroom.
+  segment_length: 24000
+  train_split: train
+  val_split: valid
+  expect:
+    name: vsco2-ce-solo-violin-fbmx
+
+loss:
+  - name: norm_mae
+    weight: 1.0
+    sample_rate: 48000
+    floor_dbfs: -40.0
+    exponent: 0.5
+  - name: mae
+    weight: 1.0
+
+train:
+  epochs: 12
+  batch_size: 32
+  chunk_size: 4096
+  # Six chunks covers a whole 24000-sample segment, so the graph is cut once per
+  # segment rather than mid-sequence.
+  tbptt_chunks: 6
+  # The pair builder already drops the first 30 ms of every interpolation pair
+  # (the engine's own attack ramp is applied in real time and so is not itself
+  # resampled). Masking a further 2048 samples here removed the note attack
+  # from the objective entirely — the transient that carries the instrument's
+  # identity. 256 is enough to let the recurrent state settle.
+  warmup_samples: 256
+  lr: 0.003
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: cosine
+  min_lr: 0.00002
+  device: cpu
+  # fp32. Training under fp16 autocast while validation, streaming inference and
+  # the exported Rust runtime all run in fp32 means the selected checkpoint was
+  # never evaluated under the arithmetic it ships with.
+  amp: false
+  seed: 20260828
+  deterministic: false
+  log_every: 200
+  validate_every: 1
+  # The composite validation loss, not `val_esr`: ESR is unstable on material
+  # with near-silent passages (see the LOSS note above), so selecting a
+  # checkpoint on it would select on the noise between notes.
+  monitor: val_loss
+  monitor_mode: min
+  early_stopping_patience: 4
+  early_stopping_min_delta: 0.0002
+  checkpoint_dir: checkpoints/vsco2_ce_violin_fbmx_v3

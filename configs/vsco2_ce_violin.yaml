@@ -1,0 +1,36 @@
+version: 1
+dataset: vsco2-ce
+dataset_version: "1.1.0"
+
+# The checked-out VSCO tree is intentionally not moved into raw/.  Supply a
+# different --source when the immutable download lives elsewhere.
+source: solfage-datasets/VSCO-2-CE
+dataset_root: solfage-datasets/vsco2-ce
+instrument: violin
+
+target_sample_rate: 48000
+preserve_channels: true
+
+trim:
+  enabled: true
+  threshold_db: -70
+  pre_roll_ms: 20
+  post_roll_ms: 100
+
+# Keep the recorded dynamic relationship by default.
+normalization:
+  enabled: false
+  mode: peak
+  target_db: -1
+
+fade_ms: 3
+
+pitch_detection:
+  enabled: true
+
+split:
+  train: 0.8
+  valid: 0.1
+  test: 0.1
+  seed: 20260827
+

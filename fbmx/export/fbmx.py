@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -385,7 +386,9 @@ def export_from_checkpoint(
     ckpt = load_checkpoint(checkpoint_path, map_location="cpu")
     model = model_from_checkpoint(ckpt, device="cpu").eval()
 
-    dataset_info = (ckpt.get("extra", {}).get("dataset", {}) or {}).get("dataset", {})
+    dataset_info = _portable_dataset_info(
+        (ckpt.get("extra", {}).get("dataset", {}) or {}).get("dataset", {})
+    )
     defaults: dict[str, Any] = {
         "name": Path(output_path).stem,
         "license": dataset_info.get("license", ""),
@@ -417,6 +420,24 @@ def export_from_checkpoint(
         extra={"checkpoint": str(Path(checkpoint_path))},
     )
     return path, read_fbmx(path)
+
+
+def _portable_dataset_info(dataset_info: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Remove developer-local paths before provenance enters a distributable model."""
+
+    portable = dict(dataset_info or {})
+    extra = dict(portable.get("extra") or {})
+    for key, value in list(extra.items()):
+        if not isinstance(value, str) or not re.match(r"^(?:[A-Za-z]:[\\/]|/|\\\\)", value):
+            continue
+        extra[key] = {
+            "source_manifest": "manifests/violin-all.jsonl",
+            "sfm": "SoloViolin.sfm",
+            "renderer": "solfage-model",
+        }.get(key, Path(value).name)
+    if extra:
+        portable["extra"] = extra
+    return portable
 
 
 def _source_type_for(dataset_source_type: str) -> str:

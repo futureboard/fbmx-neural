@@ -68,6 +68,20 @@ def test_stft_loss_backward_is_finite():
     assert torch.isfinite(pred.grad).all()
 
 
+def test_stft_loss_handles_a_short_final_training_chunk():
+    pred = torch.zeros(1, 1, 469, requires_grad=True)
+    target = torch.randn(1, 1, 469) * 0.2
+    loss = MultiResolutionSTFTLoss(
+        fft_sizes=(512, 1024, 2048),
+        hop_sizes=(128, 256, 512),
+        win_lengths=(512, 1024, 2048),
+    )
+    value = loss(pred, target)
+    value.backward()
+    assert torch.isfinite(value)
+    assert torch.isfinite(pred.grad).all()
+
+
 def test_resolutions_longer_than_the_chunk_are_dropped():
     with pytest.warns(UserWarning, match="skipping STFT resolution"):
         loss = MultiResolutionSTFTLoss(

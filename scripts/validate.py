@@ -73,24 +73,43 @@ def main() -> int:
     print(f"[validate] data        {dataset.describe()}")
 
     n = min(args.max_sequences, len(dataset))
-    batch = collate_pairs([dataset[i] for i in range(n)])
-    dry = batch["dry"].to(device)
-    wet = batch["wet"].to(device)
-    params = batch["params"].to(device)
+    items = [dataset[i] for i in range(n)]
+    reports = []
+    first_probe = None
+    for item in items:
+        # VSCO clips are intentionally variable-length. Evaluate one item at a
+        # time instead of padding/collating them into a fake batch; training's
+        # DataLoader already uses batch_size=1 for the same reason.
+        batch = collate_pairs([item])
+        dry = batch["dry"].to(device)
+        wet = batch["wet"].to(device)
+        params = batch["params"].to(device)
 
-    # Chunked and stateful: the same path inference takes.
-    state = model.init_state(dry.shape[0], device=device)
-    preds = []
-    for start in range(0, dry.shape[-1], args.chunk_size):
-        pred, state = model(dry[..., start : start + args.chunk_size], params, state)
-        preds.append(pred)
-    pred = torch.cat(preds, dim=-1)
-    assert_finite(pred, "prediction")
+        # Chunked and stateful: the same path inference takes.
+        state = model.init_state(1, device=device)
+        preds = []
+        for start in range(0, dry.shape[-1], args.chunk_size):
+            pred, state = model(dry[..., start : start + args.chunk_size], params, state)
+            preds.append(pred)
+        pred = torch.cat(preds, dim=-1)
+        assert_finite(pred, "prediction")
 
-    skip = min(args.warmup, pred.shape[-1] - 1)
-    loss, parts = loss_fn(pred[..., skip:], wet[..., skip:])
-    metrics = waveform_metrics(pred[..., skip:], wet[..., skip:])
-    metrics["loss"] = float(loss)
+        skip = min(args.warmup, pred.shape[-1] - 1)
+        loss, parts = loss_fn(pred[..., skip:], wet[..., skip:])
+        metrics = waveform_metrics(pred[..., skip:], wet[..., skip:])
+        metrics["loss"] = float(loss)
+        reports.append((metrics, parts))
+        if first_probe is None:
+            first_probe = (dry, params)
+
+    metrics = {
+        key: sum(report[0].get(key, 0.0) for report in reports) / max(len(reports), 1)
+        for key in {key for report in reports for key in report[0]}
+    }
+    parts = {
+        key: sum(report[1].get(key, 0.0) for report in reports) / max(len(reports), 1)
+        for key in {key for report in reports for key in report[1]}
+    }
 
     print("\n[validate] metrics")
     for key, value in {**metrics, **{f"loss_{k}": v for k, v in parts.items()}}.items():
@@ -106,12 +125,8 @@ def main() -> int:
     }
 
     if not args.skip_streaming:
-        probe = dry[:1, :, : min(dry.shape[-1], 16384)]
-        probe_params = params.expand_to(1) if params.batch_size == 1 else None
-        if probe_params is None:
-            from fbmx.conditioning import ParamBatch
-
-            probe_params = ParamBatch(params.continuous[:1], params.categorical[:1])
+        probe_dry, probe_params = first_probe
+        probe = probe_dry[:1, :, : min(probe_dry.shape[-1], 16384)]
         diffs = streaming_equivalence(model, probe, BLOCK_SIZES, probe_params)
         print("\n[validate] streaming equivalence (max |offline - blocked|)")
         for block, diff in diffs.items():
