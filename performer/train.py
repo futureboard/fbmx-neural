@@ -19,6 +19,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from accent.features import fit_prominence_basis
+
 from .features import (
     FEATURE_SCHEMA_VERSION,
     INPUT_FEATURES,
@@ -275,9 +277,20 @@ def train(config: TrainConfig) -> dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset_dir = Path(config.dataset_dir)
-    train_sequences = load_sequences(dataset_dir / "notes.train.jsonl")
-    validation_sequences = load_sequences(dataset_dir / "notes.validation.jsonl")
-    test_sequences = load_sequences(dataset_dir / "notes.test.jsonl")
+    # The accent inputs are the measured accent, and the recipe that turns four
+    # evidence columns into a prominence is fitted on *training* records only.
+    # Fitting it over the corpus would let the test split's covariance into the
+    # definition of a feature the model is scored with.
+    train_records = [
+        json.loads(line)
+        for line in (dataset_dir / "notes.train.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    accent_basis = fit_prominence_basis(train_records)
+
+    train_sequences = load_sequences(dataset_dir / "notes.train.jsonl", accent_basis)
+    validation_sequences = load_sequences(dataset_dir / "notes.validation.jsonl", accent_basis)
+    test_sequences = load_sequences(dataset_dir / "notes.test.jsonl", accent_basis)
     if not train_sequences:
         raise RuntimeError("no training sequences; run the dataset build and split first")
 
@@ -366,6 +379,7 @@ def train(config: TrainConfig) -> dict[str, Any]:
                     "train_config": asdict(config),
                     "input_mean": mean,
                     "input_std": std,
+                    "accent_basis": accent_basis.to_dict(),
                     "epoch": epoch,
                     "validation_score": score,
                     "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -394,6 +408,7 @@ def train(config: TrainConfig) -> dict[str, Any]:
             "validation": len(validation_sequences),
             "test": len(test_sequences),
         },
+        "accent_basis": accent_basis.to_dict(),
         "notes": {
             "train": int(sum(s.inputs.shape[0] for s in train_sequences)),
             "validation": int(sum(s.inputs.shape[0] for s in validation_sequences)),

@@ -28,7 +28,9 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from ..datasets.urmp.annotations import read_score_notes, score_tempo_bpm, score_time_signature
+from accent.predict import ShippedAnalyzer, contexts_from_score, neutral_accents
+
+from datasets.urmp.annotations import read_score_notes, score_tempo_bpm, score_time_signature
 from .features import (
     TARGET_SCALES,
     TARGETS,
@@ -52,6 +54,52 @@ LIMITS: dict[str, tuple[float, float]] = {
     "vibrato_depth": (8.0, 55.0),  # cents peak-to-peak
     "vibrato_delay": (0.0, 0.45),  # seconds
 }
+
+#: Vibrato rate is taken from the corpus rather than from the model.
+#:
+#: Leave-one-session-out cross-validation says the network is *20.9% worse*
+#: than simply predicting the training mean for this one target, and wins on
+#: only 5 folds of 14 with a correlation of 0.024 — it has found nothing. That
+#: is not a surprise once the distribution is looked at: measured violin vibrato
+#: rate runs 4.39-6.19 Hz between the 5th and 95th percentile, so the mean is
+#: already within a few tenths of a Hz of every note, and there is very little
+#: left for a score feature to explain. Using the measured median is both
+#: simpler and measurably better, and the model's rate head is kept only so the
+#: exported tensor layout does not change under a runtime that already reads it.
+#:
+#: Depth, delay, and whether to vibrate at all *are* taken from the model: those
+#: it wins 10, 9, and 11 folds of 14 respectively.
+CORPUS_VIBRATO_RATE_HZ = 5.60
+
+#: Loudness, in dB relative to a part's own reference level, that maps to the
+#: quietest and loudest engine velocity. The measured URMP violin `level` runs
+#: from about 0.17 to 1.0 of each part's 95th-percentile note, which is -15 dB
+#: to 0 dB, so a 20 dB window covers the observed range with a little headroom.
+INTENSITY_DB_FLOOR = -20.0
+
+#: Engine velocity at the floor and ceiling of that window.
+VELOCITY_RANGE = (0.20, 0.95)
+
+
+def intensity_to_velocity(level: float) -> float:
+    """Map a measured amplitude ratio onto the engine's dynamic control.
+
+    These are not the same quantity and writing one into the other is a
+    category error: `level` is linear amplitude against the part's own
+    reference, while `velocity` chooses a recorded dynamic layer and scales it.
+    Equating them made every generated note quiet — a mean velocity of 0.38
+    against the 0.75 a static render uses — which reads as a timid performance
+    rather than an expressive one.
+
+    The conversion goes through dB because that is how the distance between a
+    piano and a forte is actually spaced.
+    """
+
+    decibels = 20.0 * np.log10(max(level, 1e-4))
+    position = (decibels - INTENSITY_DB_FLOOR) / (0.0 - INTENSITY_DB_FLOOR)
+    low, high = VELOCITY_RANGE
+    return float(np.clip(low + (high - low) * position, low, high))
+
 
 #: How long a portamento takes to resolve into the note, in seconds.
 PORTAMENTO_SECONDS = 0.09
@@ -105,7 +153,7 @@ def decode(prediction: np.ndarray, *, vibrato_threshold: float = 0.5) -> list[No
                 entry_offset=_clamp(values["entry_offset"], LIMITS["entry_offset"]),
                 intensity=_clamp(values["intensity"], LIMITS["intensity"]),
                 vibrato_present=bool(present),
-                vibrato_rate=_clamp(values["vibrato_rate"], LIMITS["vibrato_rate"]),
+                vibrato_rate=CORPUS_VIBRATO_RATE_HZ,
                 vibrato_depth=_clamp(values["vibrato_depth"], LIMITS["vibrato_depth"]),
                 vibrato_delay=_clamp(values["vibrato_delay"], LIMITS["vibrato_delay"]),
             )
@@ -171,8 +219,20 @@ def generate(
     articulation: str = "sustain_vibrato",
     seed: int | None = None,
     static: bool = False,
+    analyzer: ShippedAnalyzer | None = None,
+    accent_override: Sequence[dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Score in, Solfage performance document out.
+
+    The full path is Score -> Accent Analyzer -> Performer. `analyzer` runs the
+    first hop; without one every note is given the neutral accent, which is
+    exactly what a clip nobody has analysed carries and is therefore the honest
+    control leg rather than a special "accent off" mode.
+
+    `accent_override` replaces the analysis with a supplied one. That is how the
+    ablations work: hold three components neutral, vary the fourth, and see what
+    moves. It is also how an edited accent from the editor would reach this
+    function, which is the point of accent being editable data.
 
     With `static=True` the model is not consulted at all and the score is
     written out as-is. That is the A leg of the A/B test and also the proof that
@@ -194,6 +254,21 @@ def generate(
         previous_offset = note.offset
     lengths = {index: phrases.count(index) for index in set(phrases)}
     positions: dict[int, int] = {}
+
+    if accent_override is not None:
+        accents = list(accent_override)
+        if len(accents) != len(score_notes):
+            raise ValueError(
+                f"accent override has {len(accents)} entries for {len(score_notes)} notes"
+            )
+    elif analyzer is not None:
+        accents = analyzer.analyze(
+            contexts_from_score(
+                score_notes, tempo_bpm=tempo_bpm, time_signature=time_signature
+            )
+        )
+    else:
+        accents = neutral_accents(len(score_notes))
 
     records: list[dict[str, Any]] = []
     for index, note in enumerate(score_notes):
@@ -221,13 +296,20 @@ def generate(
                 "rest_after_seconds": (following.onset - note.offset if following else None),
                 "phrase_position": positions[current],
                 "phrase_length": lengths[current],
+                "accent": accents[index],
             }
         )
         positions[current] += 1
 
     if static:
+        # The control leg: written rhythm, no expression, one fixed dynamic.
+        # 0.42 is the level that maps to the 0.75 velocity a hand-authored
+        # validation phrase uses, so A and B differ in expression and not in
+        # how loud someone set them.
         performances = [
-            NotePerformance(0.0, 1.0, 0.0, 0.0, 0.75, False, 5.5, 0.0, 0.0)
+            NotePerformance(
+                0.0, 1.0, 0.0, 0.0, 0.42, False, CORPUS_VIBRATO_RATE_HZ, 0.0, 0.0
+            )
             for _ in records
         ]
     else:
@@ -248,7 +330,7 @@ def generate(
             "start": round(start, 5),
             "duration": round(duration, 5),
             "note": int(note.midi_pitch),
-            "velocity": round(float(np.clip(performance.intensity, 0.05, 1.0)), 4),
+            "velocity": round(intensity_to_velocity(performance.intensity), 4),
             "articulation": articulation,
         }
         if not static:
@@ -259,12 +341,23 @@ def generate(
                 entry["pitch"] = curve
         notes.append(entry)
         expression.append(
-            {"t": round(start, 5), "value": round(float(np.clip(performance.intensity, 0.05, 1.0)), 4)}
+            {"t": round(start, 5), "value": round(intensity_to_velocity(performance.intensity), 4)}
         )
 
     return {
         "format": PERFORMANCE_FORMAT,
         "generated_by": "static score" if static else "fbmx-performer",
+        # What the accent inputs were, so a rendered file can be traced back to
+        # the analysis that produced it rather than only to the model.
+        "accent_source": (
+            "override"
+            if accent_override is not None
+            else ("analyzer" if analyzer is not None else "neutral")
+        ),
+        "accent": [
+            {key: round(float(value), 5) for key, value in entry.items()}
+            for entry in accents
+        ],
         "seed": seed,
         "seconds": round(end_seconds + 1.0, 3),
         "block_frames": 64,
@@ -295,6 +388,25 @@ def main() -> None:
         action="store_true",
         help="write the score with no expression at all (the A/B control)",
     )
+    parser.add_argument(
+        "--accent-rule",
+        help="rule_coefficients.json; enables the Accent Analyzer",
+    )
+    parser.add_argument(
+        "--accent-checkpoint",
+        help="accent best.pt; adds the trained correction to the rule",
+    )
+    parser.add_argument(
+        "--no-accent",
+        action="store_true",
+        help="hold every accent neutral (the accent-off leg of the A/B)",
+    )
+    parser.add_argument(
+        "--accent-only",
+        choices=("prominence", "attack", "agogic", "timbre"),
+        help="ablation: analyse normally but keep only this component, "
+        "holding the other three neutral",
+    )
     arguments = parser.parse_args()
 
     score_notes = read_score_notes(arguments.score, arguments.track)
@@ -302,20 +414,45 @@ def main() -> None:
         raise SystemExit(f"no notes on track {arguments.track} of {arguments.score}")
 
     model = None if arguments.static else load_model(arguments.checkpoint)
+    tempo = score_tempo_bpm(arguments.score)
+    signature = score_time_signature(arguments.score)
+
+    analyzer = None
+    if arguments.accent_rule and not arguments.no_accent:
+        analyzer = ShippedAnalyzer.load(
+            arguments.accent_rule, arguments.accent_checkpoint
+        )
+
+    override = None
+    if arguments.accent_only:
+        if analyzer is None:
+            raise SystemExit("--accent-only needs --accent-rule")
+        analysed = analyzer.analyze(
+            contexts_from_score(score_notes, tempo_bpm=tempo, time_signature=signature)
+        )
+        neutral = neutral_accents(len(analysed))
+        override = [
+            {**flat, arguments.accent_only: entry[arguments.accent_only]}
+            for entry, flat in zip(analysed, neutral)
+        ]
+
     document = generate(
         model,
         score_notes,
-        tempo_bpm=score_tempo_bpm(arguments.score),
-        time_signature=score_time_signature(arguments.score),
+        tempo_bpm=tempo,
+        time_signature=signature,
         articulation=arguments.articulation,
         seed=arguments.seed,
         static=arguments.static,
+        analyzer=analyzer,
+        accent_override=override,
     )
     Path(arguments.output).parent.mkdir(parents=True, exist_ok=True)
     Path(arguments.output).write_text(json.dumps(document, indent=1) + "\n", encoding="utf-8")
     print(
         f"{arguments.output}  notes={len(document['notes'])} "
-        f"seconds={document['seconds']} source={document['generated_by']}"
+        f"seconds={document['seconds']} source={document['generated_by']} "
+        f"accent={document['accent_source']}"
     )
 
 

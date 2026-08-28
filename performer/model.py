@@ -124,6 +124,56 @@ class Performer(nn.Module):
     def parameter_count(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters())
 
+    def export_spec(self) -> dict[str, Any]:
+        """Everything the ``.fbmx`` writer needs about this architecture.
+
+        The container is reused rather than forked: it already stores a JSON
+        header, named tensors, and a hash, and none of that is audio-specific.
+        What *is* audio-specific is the reader's assumption that a model takes
+        one sample and returns one sample, so the model type is distinct
+        (``performer-gru``) and `input_spec` states the real shape — a sequence
+        of note feature vectors in, a sequence of performance vectors out.
+        """
+
+        from .features import INPUT_FEATURES, TARGETS, TARGET_SCALES
+
+        return {
+            "model_type": "performer-gru",
+            # A performance model has no sample rate; it runs once per note and
+            # its curves are rendered at the control rate the engine reads.
+            "sample_rate": 0,
+            "channels": 0,
+            "causal": not self.config.bidirectional,
+            "recurrent": True,
+            "receptive_field": 0,
+            "parameter_count": self.parameter_count(),
+            "hparams": {
+                "hidden_size": self.config.hidden_size,
+                "num_layers": self.config.num_layers,
+                "bidirectional": self.config.bidirectional,
+                "mode": self.config.mode,
+                "input_size": self.config.input_size,
+                "output_size": self.config.output_size,
+                "rnn": "gru",
+                "control_rate_hz": 100.0,
+            },
+            "input_features": {
+                "layout": "BNF",
+                "order": list(INPUT_FEATURES),
+                "size": self.config.input_size,
+                "normalization": "per-feature mean/std stored as input_mean and input_std",
+            },
+            "output_spec": {
+                "layout": "BNO",
+                "regression": list(TARGETS),
+                "scales": {name: TARGET_SCALES[name] for name in TARGETS},
+                "classification": ["vibrato_present"],
+                "size": self.config.output_size,
+            },
+            "conditioning": {"continuous": [], "categorical": []},
+            "output_heads": ["performance"],
+        }
+
 
 @dataclass
 class BaselineStats:

@@ -21,6 +21,7 @@ import numpy as np
 import soundfile as sf
 
 from . import DATASET_ATTRIBUTION, DATASET_LICENSE, DATASET_NAME, PIPELINE_VERSION
+from .accent import measure_attack_acoustics, part_evidence
 from .align import align
 from .annotations import read_f0, read_performed_notes, read_score_notes, score_tempo_bpm, score_time_signature
 from .discovery import VIOLIN, discover
@@ -32,7 +33,7 @@ from .features import (
     measure_vibrato,
 )
 
-RECORD_SCHEMA_VERSION = 1
+RECORD_SCHEMA_VERSION = 2
 
 #: Confident-match threshold below which a note is not written at all.
 MIN_NOTE_CONFIDENCE = 0.5
@@ -148,9 +149,56 @@ def build_part_records(piece, part, *, group_id: str) -> tuple[list[dict[str, An
             note_rms.append(float(np.sqrt(np.mean(segment**2))))
     reference_rms = float(np.percentile(note_rms, 95)) if note_rms else 1.0
 
+    # ── accent evidence ──────────────────────────────────────────────────
+    # Measured for *every* matched note, including the low-confidence ones the
+    # record loop drops. A note's neighbourhood is the music around it; leaving
+    # a doubtful note out of the reference does not make the reference better,
+    # it makes it shorter.
+    acoustics = [
+        measure_attack_acoustics(
+            audio,
+            sample_rate,
+            onset=match.performed.onset,
+            duration=match.performed.duration,
+            reference_rms=reference_rms,
+            # The *written* pitch, not the tracked one: a note whose F0 estimate
+            # is an octave out would otherwise get a spectral band an octave
+            # wrong, which is a much larger error than the intonation the
+            # written pitch ignores.
+            fundamental_hz=440.0 * 2.0 ** ((match.score.midi_pitch - 69) / 12.0),
+        )
+        for match in alignment.matches
+    ]
+    gaps_before: list[float | None] = []
+    extra_gaps: list[float | None] = []
+    for position, match in enumerate(alignment.matches):
+        previous = alignment.matches[position - 1] if position > 0 else None
+        if previous is None:
+            gaps_before.append(None)
+            extra_gaps.append(None)
+            continue
+        gap = match.performed.onset - previous.performed.offset
+        # The written rest, stretched into performed time. What is left over is
+        # separation the player chose to add; the rest itself is the composer's.
+        written = max(match.score.onset - previous.score.offset, 0.0) * match.local_stretch
+        gaps_before.append(gap)
+        extra_gaps.append(gap - written)
+    evidence = part_evidence(
+        acoustics,
+        pitches=[match.score.midi_pitch for match in alignment.matches],
+        duration_ratios=[match.duration_ratio for match in alignment.matches],
+        onset_residuals=[match.onset_residual for match in alignment.matches],
+        extra_gaps=extra_gaps,
+    )
+
     tempo = score_tempo_bpm(piece.score_midi)
     numerator, denominator = score_time_signature(piece.score_midi)
     beat_seconds = 60.0 / max(tempo, 1e-6)
+    # Bar length in *quarter-note beats*, which is the unit `score_beat` is in.
+    # `numerator` alone is only the bar length when the denominator is 4: a 3/2
+    # bar is three half notes, six quarters, and taking `score_beat % 3` there
+    # folds two bars into one and puts every other downbeat on beat 3.
+    bar_beats = max(numerator * 4.0 / max(denominator, 1), 1e-6)
     phrases = _phrase_boundaries(alignment.matches)
     phrase_counts: dict[int, int] = defaultdict(int)
     for phrase in phrases:
@@ -231,7 +279,8 @@ def build_part_records(piece, part, *, group_id: str) -> tuple[list[dict[str, An
             "score_duration_seconds": round(match.score.duration, 5),
             "score_velocity": match.score.velocity,
             "score_beat": round(score_beat, 5),
-            "beat_in_bar": round(score_beat % max(numerator, 1), 5),
+            "beat_in_bar": round(score_beat % bar_beats, 5),
+            "bar_beats": round(bar_beats, 5),
             "tempo_bpm": round(tempo, 4),
             "time_signature": [numerator, denominator],
             "previous_interval": (
@@ -265,6 +314,21 @@ def build_part_records(piece, part, *, group_id: str) -> tuple[list[dict[str, An
             "alignment_confidence": round(match.confidence, 4),
             "control_rate_hz": CONTROL_RATE_HZ,
         }
+        # The four evidence families, and the raw descriptors they came from.
+        # Both are kept: the evidence is what a model is trained against, the
+        # raw numbers are what lets a later study disagree with how it was
+        # derived without re-reading 61 minutes of audio.
+        accent = evidence[position]
+        accent_payload = accent.to_dict()
+        if accent_payload:
+            record["accent_evidence"] = accent_payload
+        if acoustics[position] is not None:
+            record["accent_acoustics"] = acoustics[position].to_dict()
+        if gaps_before[position] is not None:
+            record["performed_gap_before_seconds"] = round(float(gaps_before[position]), 5)
+        if extra_gaps[position] is not None:
+            record["unwritten_gap_before_seconds"] = round(float(extra_gaps[position]), 5)
+
         if intensity is not None:
             record["intensity"] = {
                 "level": round(intensity.level, 5),
@@ -277,6 +341,14 @@ def build_part_records(piece, part, *, group_id: str) -> tuple[list[dict[str, An
         records.append(record)
 
     diagnostics["records"] = len(records)
+    diagnostics["accent_evidence"] = {
+        name: sum(
+            1
+            for record in records
+            if record.get("accent_evidence", {}).get(name) is not None
+        )
+        for name in ("attack", "dynamic", "agogic", "timbre")
+    }
     diagnostics["tuning_offset_cents"] = round(tuning_offset_cents, 3)
     diagnostics["vibrato_rejections"] = dict(vibrato_reasons)
     diagnostics["reference_rms"] = round(reference_rms, 6)
